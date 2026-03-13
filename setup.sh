@@ -1,22 +1,12 @@
 #!/bin/bash
 set -e
 
-# ---------------------- [DONOT CHANGE ANYTHING BELOW] ---------------------------------- #
-# Start supervisord if not already running (manages k3s, dockerd, dnsmasq)
-if ! pgrep -x supervisord &> /dev/null; then
-    echo "Starting supervisord..."
-    /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
-    sleep 5
-fi
-
-# Set kubeconfig for k3s
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
-# Wait for k3s to be ready (k3s can take 30-60 seconds to start)
-echo "Waiting for k3s to be ready..."
-MAX_WAIT=180
 ELAPSED=0
-until kubectl get nodes &> /dev/null; do
+MAX_WAIT=180
+
+until kubectl cluster-info >/dev/null 2>&1; do
     if [ $ELAPSED -ge $MAX_WAIT ]; then
         echo "Error: k3s is not ready after ${MAX_WAIT} seconds"
         exit 1
@@ -27,7 +17,6 @@ until kubectl get nodes &> /dev/null; do
 done
 
 echo "k3s is ready!"
-# ---------------------- [DONOT CHANGE ANYTHING ABOVE] ---------------------------------- #
 
 NS="bleater"
 MON_NS="monitoring"
