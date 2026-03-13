@@ -178,7 +178,7 @@ data:
         Host              loki.${MON_NS}.svc.cluster.local
         Port              3100
         Labels            job=fluent-bit
-        LabelKeys         \$node_name,\$kernel_version,\$node_labels
+        label_keys         \$node_name,\$kernel_version,\$node_labels
         LineFormat        json
 
   parsers.conf: |
@@ -554,7 +554,7 @@ config:
         Host              loki.monitoring.svc.cluster.local
         Port              3100
         Labels            job=fluent-bit
-        LabelKeys         $node_name,$kernel_version,$node_labels
+        label_keys         $node_name,$kernel_version,$node_labels
         LineFormat        json
 
 resources:
