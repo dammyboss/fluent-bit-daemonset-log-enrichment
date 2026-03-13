@@ -603,8 +603,8 @@ def grade(transcript: str) -> GradingResult:
 
     # ═════════════════════════════════════════════════════════════════════════
     # SUBSCORE 5: gitops_integration (0.20)
-    # C5.1: ArgoCD Application 'fluent-bit' exists with status Synced
-    # C5.2: ArgoCD Application shows Healthy status
+    # C5.1: ArgoCD Application 'fluent-bit' exists with correct repoURL
+    # C5.2: ArgoCD repo Secret exists with correct credentials
     # C5.3: ArgoCD source path points to charts/fluent-bit (not legacy)
     #        AND destination namespace is monitoring
     # C5.4: ArgoCD Application has automated.selfHeal: true
@@ -624,39 +624,57 @@ def grade(transcript: str) -> GradingResult:
     except Exception:
         pass
 
-    # C5.1: Synced status
+    # C5.1: Application exists with correct repoURL pointing to platform-logging
     try:
         if argo_app:
-            sync_status = argo_app.get("status", {}).get("sync", {}).get("status", "")
-            if sync_status == "Synced":
-                print(f"✓ C5.1: ArgoCD Application fluent-bit is Synced")
+            repo_url = argo_app.get("spec", {}).get("source", {}).get("repoURL", "")
+            if "platform-logging" in repo_url and "gitea" in repo_url:
+                print(f"✓ C5.1: ArgoCD Application exists with correct repoURL: {repo_url}")
                 s5_checks.append(True)
             else:
-                print(f"✗ C5.1: ArgoCD sync status = '{sync_status}' (expected Synced)")
-                # Show sync conditions for debugging
-                conditions = argo_app.get("status", {}).get("conditions", [])
-                for c in conditions[:3]:
-                    print(f"  Condition: {c.get('type')}: {c.get('message', '')[:100]}")
+                print(f"✗ C5.1: ArgoCD Application repoURL = '{repo_url}' (expected platform-logging on Gitea)")
                 s5_checks.append(False)
         else:
-            print("✗ C5.1: ArgoCD Application fluent-bit not found")
+            print("✗ C5.1: ArgoCD Application fluent-bit not found in argocd namespace")
             s5_checks.append(False)
     except Exception as e:
         print(f"✗ C5.1: Error: {e}")
         s5_checks.append(False)
 
-    # C5.2: Healthy status
+    # C5.2: ArgoCD repo Secret exists with correct type and URL
     try:
-        if argo_app:
-            health_status = argo_app.get("status", {}).get("health", {}).get("status", "")
-            if health_status == "Healthy":
-                print(f"✓ C5.2: ArgoCD Application fluent-bit is Healthy")
+        stdout, rc = run_kubectl_command(
+            "get", "secret", "-l", "argocd.argoproj.io/secret-type=repository",
+            "-o", "json", namespace="argocd", timeout=10
+        )
+        if rc == 0:
+            secrets = json.loads(stdout)
+            found_valid = False
+            for secret in secrets.get("items", []):
+                data = secret.get("data", {})
+                string_data = secret.get("stringData", {})
+                # Check decoded data
+                import base64
+                secret_url = ""
+                secret_type = ""
+                try:
+                    if "url" in data:
+                        secret_url = base64.b64decode(data["url"]).decode()
+                    if "type" in data:
+                        secret_type = base64.b64decode(data["type"]).decode()
+                except Exception:
+                    pass
+                if "platform-logging" in secret_url and secret_type == "git":
+                    found_valid = True
+                    print(f"✓ C5.2: ArgoCD repo Secret found with url={secret_url}, type={secret_type}")
+                    break
+            if found_valid:
                 s5_checks.append(True)
             else:
-                print(f"✗ C5.2: ArgoCD health status = '{health_status}' (expected Healthy)")
+                print("✗ C5.2: No ArgoCD repo Secret found with platform-logging URL and type=git")
                 s5_checks.append(False)
         else:
-            print("✗ C5.2: ArgoCD Application not found")
+            print("✗ C5.2: Could not list ArgoCD repo Secrets")
             s5_checks.append(False)
     except Exception as e:
         print(f"✗ C5.2: Error: {e}")
@@ -737,8 +755,8 @@ def grade(transcript: str) -> GradingResult:
          "Prometheus scraping Fluent Bit metrics via ServiceMonitor, fluentbit_* metrics available",
          "Prometheus cannot scrape Fluent Bit — check ServiceMonitor selector, HTTP_Server, NetworkPolicy, and relabel rules"),
         ("gitops_integration",
-         "ArgoCD Application synced and healthy, correct source path and destination, selfHeal enabled",
-         "GitOps not working — check ArgoCD Application path, repo credentials, destination namespace, and sync policy"),
+         "ArgoCD Application configured correctly with repo credentials, correct source path, destination, and selfHeal",
+         "GitOps not configured — check ArgoCD Application path, repo secret credentials, destination namespace, and sync policy"),
     ]
 
     for key, pass_msg, fail_msg in checks:

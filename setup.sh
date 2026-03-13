@@ -1159,14 +1159,13 @@ try:
     print(m.group(1).strip() if m else 'password')
 except: print('password')
 " 2>/dev/null)
-GITEA_CRED="root:${GITEA_PASS}"
-GITEA_API="http://${GITEA_CRED}@gitea.gitea.svc.cluster.local:3000/api/v1"
+GITEA_API="http://gitea.gitea.svc.cluster.local:3000/api/v1"
 GITEA_URL="http://gitea.gitea.svc.cluster.local:3000"
 
 echo "  Setting up Gitea repos..."
 
 # Create platform-logging repo in Gitea
-curl -sf -X POST "${GITEA_API}/user/repos" \
+curl -sf -u "root:${GITEA_PASS}" -X POST "${GITEA_API}/user/repos" \
     -H "Content-Type: application/json" \
     -d '{"name":"platform-logging","description":"Platform logging Helm values and ArgoCD manifests","auto_init":true,"default_branch":"main"}' \
     2>/dev/null && echo "    Gitea repo root/platform-logging created" || echo "    Gitea repo may already exist"
@@ -1227,7 +1226,7 @@ serviceMonitor:
 HELMEOF
 )
 
-curl -sf -X POST "${GITEA_API}/repos/root/platform-logging/contents/charts/logging-legacy/values.yaml" \
+curl -sf -u "root:${GITEA_PASS}" -X POST "${GITEA_API}/repos/root/platform-logging/contents/charts/logging-legacy/values.yaml" \
     -H "Content-Type: application/json" \
     -d "{\"content\":\"$(echo "$LEGACY_VALUES" | base64 -w0)\",\"message\":\"Add legacy logging config\"}" \
     2>/dev/null && echo "    charts/logging-legacy/values.yaml created (wrong path)" || true
@@ -1294,7 +1293,7 @@ luaScripts: {}
 HELMEOF
 )
 
-curl -sf -X POST "${GITEA_API}/repos/root/platform-logging/contents/charts/fluent-bit/values.yaml" \
+curl -sf -u "root:${GITEA_PASS}" -X POST "${GITEA_API}/repos/root/platform-logging/contents/charts/fluent-bit/values.yaml" \
     -H "Content-Type: application/json" \
     -d "{\"content\":\"$(echo "$CORRECT_PATH_VALUES" | base64 -w0)\",\"message\":\"Add fluent-bit config\"}" \
     2>/dev/null && echo "    charts/fluent-bit/values.yaml created (has Deployment, not DaemonSet)" || true
@@ -1310,13 +1309,13 @@ appVersion: "2.1"
 CHARTEOF
 )
 
-curl -sf -X POST "${GITEA_API}/repos/root/platform-logging/contents/charts/fluent-bit/Chart.yaml" \
+curl -sf -u "root:${GITEA_PASS}" -X POST "${GITEA_API}/repos/root/platform-logging/contents/charts/fluent-bit/Chart.yaml" \
     -H "Content-Type: application/json" \
     -d "{\"content\":\"$(echo "$CHART_YAML" | base64 -w0)\",\"message\":\"Add chart metadata\"}" \
     2>/dev/null || true
 
 # Create a second decoy repo for the decoy ArgoCD Application
-curl -sf -X POST "${GITEA_API}/user/repos" \
+curl -sf -u "root:${GITEA_PASS}" -X POST "${GITEA_API}/user/repos" \
     -H "Content-Type: application/json" \
     -d '{"name":"observability-stack","description":"Observability stack configs (Promtail, Jaeger, etc)","auto_init":true,"default_branch":"main"}' \
     2>/dev/null || true
@@ -1348,7 +1347,7 @@ tolerations:
 HELMEOF
 )
 
-curl -sf -X POST "${GITEA_API}/repos/root/observability-stack/contents/charts/promtail/values.yaml" \
+curl -sf -u "root:${GITEA_PASS}" -X POST "${GITEA_API}/repos/root/observability-stack/contents/charts/promtail/values.yaml" \
     -H "Content-Type: application/json" \
     -d "{\"content\":\"$(echo "$PROMTAIL_VALUES" | base64 -w0)\",\"message\":\"Add promtail config\"}" \
     2>/dev/null || true
@@ -1670,7 +1669,7 @@ for PAGE_DATA in \
     'Incident-2026-02-Log-Gap|## Incident Report: Log Collection Gap (2026-02-20)\n\n### Summary\nLogs were missing from Loki for approximately 45 minutes during a cluster maintenance event.\nThe SRE team was unable to correlate the gap with any infrastructure events due to missing\nnode-level metadata in the log streams.\n\n### Root Cause\nThe log collection agent was not resilient to pod rescheduling. Additionally, the agent\nconfiguration did not include node-level context, making incident triage difficult.\n\n### Resolution\nThe platform team initiated a migration to a new log collection architecture.\nSee #platform-ops channel in Mattermost for the latest migration status.\nThe `log-collector` ArgoCD Application was created to manage the new deployment.\n\n### Action Items\n- [x] Deploy new log collection agent via ArgoCD\n- [x] Deprecate legacy logging configuration\n- [ ] Complete node metadata enrichment rollout\n- [ ] Clean up legacy log collection resources\n- [ ] Update Grafana dashboards for new label schema'; do
     PAGE_TITLE=$(echo "$PAGE_DATA" | cut -d'|' -f1)
     PAGE_CONTENT=$(echo "$PAGE_DATA" | cut -d'|' -f2-)
-    curl -sf -X POST "${GITEA_API}/repos/root/bleater-app/wiki/new" \
+    curl -sf -u "root:${GITEA_PASS}" -X POST "${GITEA_API}/repos/root/bleater-app/wiki/new" \
         -H "Content-Type: application/json" \
         -d "{\"title\":\"${PAGE_TITLE}\",\"content_base64\":\"$(echo -e "$PAGE_CONTENT" | base64 -w0)\"}" \
         2>/dev/null && echo "    Wiki: $PAGE_TITLE" || true
