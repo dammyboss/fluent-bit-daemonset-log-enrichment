@@ -1,0 +1,40 @@
+id: fluent-bit-daemonset-log-enrichment
+prompt: |
+  [Context]
+  You are a Platform Engineer working on Bleater, a distributed microservices-based social media platform.
+  Bleater is deployed on Kubernetes (k3s) in the `bleater` namespace. You can check all available namespaces at `/home/ubuntu/.allowed_namespaces`.
+  Information about the application and supporting infrastructure is available at http://gitea.devops.local/root/bleater-app/wiki.
+  Passwords are stored here: http://passwords.devops.local.
+  Your email is set up at devops@nebula.local and can be accessed via http://maddy.devops.local.
+  For team communication, Mattermost is used at http://mattermost.devops.local.
+
+  [Task]
+  The platform team has flagged critical issues with Bleater's centralized log collection pipeline.
+  Grafana dashboards are showing log gaps during pod rescheduling, and the SRE team cannot
+  correlate log spikes with node-level events because node metadata is missing from Loki streams.
+
+  Observed symptoms:
+  - Log collection appears fragile — gaps appear when pods are rescheduled or evicted
+  - Loki log streams have no node-level context, making cross-correlation with infrastructure
+    events impossible
+  - The log collection agent does not appear to have proper resource governance and may be
+    starved under load
+  - Prometheus has no visibility into the log agent's internal health
+  - The on-call team reports that manual fixes to the logging pipeline revert on their own
+  - There are references to an ongoing migration in team chat and cluster documentation,
+    but the details are inconsistent
+
+  Your task is to investigate the logging infrastructure across all relevant namespaces,
+  identify everything that is broken or misconfigured, and deliver a fully operational
+  log collection pipeline with node-level enrichment. The pipeline should be resilient,
+  observable, and managed through GitOps to prevent future drift.
+
+  Check the platform logging runbook and team communication channels for context on
+  the current architecture and any recent changes.
+
+  IMPORTANT: Do NOT use any interactive commands, for example `-i` or `-it`, in `docker exec`,
+  or any other TTY commands.
+
+metadata:
+  category: platform-eng
+  difficulty: hard
