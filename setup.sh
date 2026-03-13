@@ -929,6 +929,20 @@ echo ""
 echo "Phase 5: Subscore 4 breakages — Prometheus metrics..."
 echo ""
 
+# Wait for Prometheus operator CRDs to be available
+echo "  Waiting for ServiceMonitor CRD..."
+ELAPSED=0
+MAX_CRD_WAIT=300
+until kubectl get crd servicemonitors.monitoring.coreos.com &>/dev/null; do
+    if [ $ELAPSED -ge $MAX_CRD_WAIT ]; then
+        echo "  Warning: ServiceMonitor CRD not available after ${MAX_CRD_WAIT}s, continuing anyway..."
+        break
+    fi
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+done
+echo "  ServiceMonitor CRD ready (${ELAPSED}s)"
+
 # ── B13: Broken ServiceMonitor with wrong selector ──
 echo "  B13: Creating broken ServiceMonitor..."
 
@@ -1282,6 +1296,20 @@ curl -sf -X POST "${GITEA_API}/repos/root/observability-stack/contents/charts/pr
     -H "Content-Type: application/json" \
     -d "{\"content\":\"$(echo "$PROMTAIL_VALUES" | base64 -w0)\",\"message\":\"Add promtail config\"}" \
     2>/dev/null || true
+
+# Wait for ArgoCD Application CRD to be available
+echo "  Waiting for ArgoCD Application CRD..."
+ELAPSED=0
+MAX_CRD_WAIT=300
+until kubectl get crd applications.argoproj.io &>/dev/null; do
+    if [ $ELAPSED -ge $MAX_CRD_WAIT ]; then
+        echo "  Warning: ArgoCD Application CRD not available after ${MAX_CRD_WAIT}s, continuing anyway..."
+        break
+    fi
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+done
+echo "  ArgoCD Application CRD ready (${ELAPSED}s)"
 
 # ── B17: ArgoCD Application with wrong source path ──
 echo "  B17: Creating ArgoCD Application with wrong path..."
