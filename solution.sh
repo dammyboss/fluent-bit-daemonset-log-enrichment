@@ -179,7 +179,7 @@ data:
         Port              3100
         Labels            job=fluent-bit
         label_keys         \$node_name,\$kernel_version,\$node_labels
-        LineFormat        json
+        line_format       json
 
   parsers.conf: |
     [PARSER]
@@ -555,7 +555,7 @@ config:
         Port              3100
         Labels            job=fluent-bit
         label_keys         $node_name,$kernel_version,$node_labels
-        LineFormat        json
+        line_format       json
 
 resources:
   requests:
