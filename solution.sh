@@ -604,20 +604,24 @@ luaScripts:
 HELMEOF
 )
 
-# Get the current file SHA (needed for update)
+# Get the current file SHA (needed for update) — tolerate errors
+set +e
 FILE_SHA=$(curl -sf "${GITEA_API}/repos/root/platform-logging/contents/charts/fluent-bit/values.yaml" \
     2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null)
+set -e
+
+ENCODED_VALUES=$(echo "$CORRECT_VALUES" | base64 -w0 2>/dev/null || echo "$CORRECT_VALUES" | base64 2>/dev/null)
 
 if [ -n "$FILE_SHA" ]; then
     curl -sf -X PUT "${GITEA_API}/repos/root/platform-logging/contents/charts/fluent-bit/values.yaml" \
         -H "Content-Type: application/json" \
-        -d "{\"content\":\"$(echo "$CORRECT_VALUES" | base64 -w0)\",\"message\":\"Update to DaemonSet with node enrichment\",\"sha\":\"$FILE_SHA\"}" \
-        2>/dev/null && echo "    ✓ charts/fluent-bit/values.yaml updated with DaemonSet config" || true
+        -d "{\"content\":\"${ENCODED_VALUES}\",\"message\":\"Update to DaemonSet with node enrichment\",\"sha\":\"$FILE_SHA\"}" \
+        2>/dev/null && echo "    ✓ charts/fluent-bit/values.yaml updated with DaemonSet config" || echo "    Note: Could not update values.yaml (may need manual update)"
 else
     curl -sf -X POST "${GITEA_API}/repos/root/platform-logging/contents/charts/fluent-bit/values.yaml" \
         -H "Content-Type: application/json" \
-        -d "{\"content\":\"$(echo "$CORRECT_VALUES" | base64 -w0)\",\"message\":\"Add DaemonSet config\"}" \
-        2>/dev/null || true
+        -d "{\"content\":\"${ENCODED_VALUES}\",\"message\":\"Add DaemonSet config\"}" \
+        2>/dev/null && echo "    ✓ charts/fluent-bit/values.yaml created" || echo "    Note: Could not create values.yaml (may need manual update)"
 fi
 
 # 10b: Fix ArgoCD repo Secret with correct password (B18)
