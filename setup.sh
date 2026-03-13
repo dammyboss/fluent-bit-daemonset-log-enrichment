@@ -197,6 +197,7 @@ spec:
       containers:
       - name: fluent-bit
         image: fluent/fluent-bit:2.1
+        imagePullPolicy: IfNotPresent
         volumeMounts:
         - name: config
           mountPath: /fluent-bit/etc/
@@ -240,6 +241,7 @@ spec:
   containers:
   - name: enforcer
     image: bitnami/kubectl:latest
+    imagePullPolicy: IfNotPresent
     command:
     - /bin/sh
     - -c
@@ -303,6 +305,7 @@ spec:
       containers:
       - name: fluent-bit
         image: fluent/fluent-bit:2.1
+        imagePullPolicy: IfNotPresent
         volumeMounts:
         - name: config
           mountPath: /fluent-bit/etc/
@@ -370,6 +373,7 @@ data:
           containers:
           - name: fluent-bit
             image: fluent/fluent-bit:2.1
+        imagePullPolicy: IfNotPresent
             volumeMounts:
             - name: config
               mountPath: /fluent-bit/etc/
@@ -441,6 +445,7 @@ spec:
           containers:
           - name: reconciler
             image: bitnami/kubectl:latest
+            imagePullPolicy: IfNotPresent
             command: ["/bin/sh", "/scripts/reconcile.sh"]
             volumeMounts:
             - name: script
@@ -847,6 +852,7 @@ spec:
           containers:
           - name: enforcer
             image: bitnami/kubectl:latest
+            imagePullPolicy: IfNotPresent
             command: ["/bin/sh", "/scripts/enforce.sh"]
             volumeMounts:
             - name: script
@@ -1505,6 +1511,7 @@ spec:
       containers:
       - name: promtail
         image: grafana/promtail:2.9.0
+        imagePullPolicy: IfNotPresent
         args:
         - -config.file=/etc/promtail/promtail.yaml
         - -client.url=http://loki-nonexistent.monitoring.svc.cluster.local:3100/loki/api/v1/push
@@ -1588,6 +1595,7 @@ spec:
           containers:
           - name: checker
             image: bitnami/kubectl:latest
+            imagePullPolicy: IfNotPresent
             command: ["/bin/sh", "-c", "kubectl get certificates -A 2>/dev/null || true"]
           restartPolicy: Never
 ---
@@ -1609,6 +1617,7 @@ spec:
           containers:
           - name: reporter
             image: bitnami/kubectl:latest
+            imagePullPolicy: IfNotPresent
             command: ["/bin/sh", "-c", "kubectl get nodes -o wide 2>/dev/null || true"]
           restartPolicy: Never
 ---
@@ -1630,6 +1639,7 @@ spec:
           containers:
           - name: monitor
             image: bitnami/kubectl:latest
+            imagePullPolicy: IfNotPresent
             command: ["/bin/sh", "-c", "kubectl get pvc -A 2>/dev/null || true"]
           restartPolicy: Never
 EOF

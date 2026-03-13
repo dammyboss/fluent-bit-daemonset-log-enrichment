@@ -268,6 +268,7 @@ spec:
       containers:
       - name: fluent-bit
         image: fluent/fluent-bit:2.1
+        imagePullPolicy: IfNotPresent
         env:
         - name: NODE_NAME
           valueFrom:
@@ -298,6 +299,7 @@ spec:
       initContainers:
       - name: node-info-collector
         image: bitnami/kubectl:latest
+        imagePullPolicy: IfNotPresent
         command:
         - /bin/sh
         - -c

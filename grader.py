@@ -494,7 +494,10 @@ def grade(transcript: str) -> GradingResult:
 
     # C4.2: Prometheus scrape target is UP
     try:
-        results = check_prometheus_metric('up{job=~".*fluent.*"}')
+        results = check_prometheus_metric('up{app="fluent-bit"}')
+        if not results:
+            # Fallback: check by job name pattern
+            results = check_prometheus_metric('up{job=~".*fluent.*"}')
         if results:
             up_value = results[0].get("value", [None, "0"])[1]
             if up_value == "1":

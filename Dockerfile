@@ -9,6 +9,14 @@ RUN skopeo copy \
     docker://bitnami/kubectl:latest \
     docker-archive:kubectl-latest.tar:bitnami/kubectl:latest
 
+RUN skopeo copy \
+    docker://fluent/fluent-bit:2.1 \
+    docker-archive:fluent-bit-2.1.tar:fluent/fluent-bit:2.1
+
+RUN skopeo copy \
+    docker://grafana/promtail:2.9.0 \
+    docker-archive:promtail-2.9.0.tar:grafana/promtail:2.9.0
+
 # ==========================================================
 # Stage 2: Final nebula-devops image with pre-cached images
 # ==========================================================
