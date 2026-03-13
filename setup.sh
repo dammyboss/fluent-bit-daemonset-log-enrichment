@@ -959,6 +959,40 @@ else
     echo "  ServiceMonitor CRD already available"
 fi
 
+# Ensure PrometheusRule CRD exists
+if ! kubectl get crd prometheusrules.monitoring.coreos.com &>/dev/null; then
+    echo "  PrometheusRule CRD not found — installing..."
+    kubectl apply -f - <<'CRDEOF'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: prometheusrules.monitoring.coreos.com
+spec:
+  group: monitoring.coreos.com
+  names:
+    kind: PrometheusRule
+    listKind: PrometheusRuleList
+    plural: prometheusrules
+    singular: prometheusrule
+  scope: Namespaced
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+CRDEOF
+    echo "  PrometheusRule CRD installed"
+    sleep 3
+else
+    echo "  PrometheusRule CRD already available"
+fi
+
 # ── B13: Broken ServiceMonitor with wrong selector ──
 echo "  B13: Creating broken ServiceMonitor..."
 
