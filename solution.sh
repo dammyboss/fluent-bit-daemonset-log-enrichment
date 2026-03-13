@@ -308,22 +308,8 @@ spec:
           # Get kernel version from node object
           KERNEL=\$(kubectl get node \$NODE_NAME -o jsonpath='{.status.nodeInfo.kernelVersion}' 2>/dev/null || uname -r)
           echo -n "\$KERNEL" > /node-info/kernel_version
-          # Get node labels
-          LABELS=\$(kubectl get node \$NODE_NAME -o jsonpath='{range .metadata.labels[*]}{@}{","}{end}' 2>/dev/null | sed 's/,$//')
-          # Format as key=value pairs
-          kubectl get node \$NODE_NAME -o json 2>/dev/null | python3 -c "
-          import json, sys
-          try:
-              node = json.load(sys.stdin)
-              labels = node.get('metadata',{}).get('labels',{})
-              # Pick a few representative labels
-              parts = []
-              for k,v in sorted(labels.items()):
-                  parts.append(f'{k}={v}')
-              print(','.join(parts[:10]))
-          except:
-              print('')
-          " > /node-info/node_labels
+          # Get node labels using go-template (no python3 needed)
+          kubectl get node \$NODE_NAME -o go-template='{{range \$k, \$v := .metadata.labels}}{{printf "%s=%s," \$k \$v}}{{end}}' 2>/dev/null | sed 's/,$//' > /node-info/node_labels
           echo "Node info collected: kernel=\$KERNEL"
         env:
         - name: NODE_NAME
@@ -490,8 +476,8 @@ try:
 except: print('password')
 " 2>/dev/null)
 GITEA_CRED="root:${GITEA_PASS}"
-GITEA_API="http://${GITEA_CRED}@gitea.devops.local/api/v1"
-GITEA_URL="http://gitea.devops.local"
+GITEA_API="http://${GITEA_CRED}@gitea.gitea.svc.cluster.local:3000/api/v1"
+GITEA_URL="http://gitea.gitea.svc.cluster.local:3000"
 
 echo "  10a: Updating Gitea repo with correct DaemonSet values..."
 
