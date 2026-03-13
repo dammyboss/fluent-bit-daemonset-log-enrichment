@@ -88,20 +88,15 @@ echo ""
 
 echo "Phase 1: Creating namespaces and prerequisites..."
 
-# Create namespaces
-kubectl create namespace "$LOG_NS" 2>/dev/null || true
-kubectl label namespace "$LOG_NS" purpose=legacy-logging app.kubernetes.io/managed-by=platform-ops --overwrite 2>/dev/null || true
+# Create namespaces (create if they don't exist)
+for NS_CREATE in "$LOG_NS" "$OPS_NS" "$MON_NS" "$OBS_NS" "cert-manager" "argocd"; do
+    kubectl get namespace "$NS_CREATE" &>/dev/null || kubectl create namespace "$NS_CREATE" 2>/dev/null || true
+done
 
-kubectl create namespace "$OPS_NS" 2>/dev/null || true
+kubectl label namespace "$LOG_NS" purpose=legacy-logging app.kubernetes.io/managed-by=platform-ops --overwrite 2>/dev/null || true
 kubectl label namespace "$OPS_NS" app.kubernetes.io/managed-by=platform-ops purpose=operations --overwrite 2>/dev/null || true
 
-# Ensure monitoring namespace exists
-kubectl get namespace "$MON_NS" &>/dev/null || kubectl create namespace "$MON_NS" 2>/dev/null || true
-
-# Ensure observability namespace exists
-kubectl get namespace "$OBS_NS" &>/dev/null || kubectl create namespace "$OBS_NS" 2>/dev/null || true
-
-echo "  Namespaces ready: $LOG_NS, $OPS_NS, $MON_NS, $OBS_NS"
+echo "  Namespaces ready: $LOG_NS, $OPS_NS, $MON_NS, $OBS_NS, cert-manager, argocd"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -929,19 +924,40 @@ echo ""
 echo "Phase 5: Subscore 4 breakages — Prometheus metrics..."
 echo ""
 
-# Wait for Prometheus operator CRDs to be available
-echo "  Waiting for ServiceMonitor CRD..."
-ELAPSED=0
-MAX_CRD_WAIT=300
-until kubectl get crd servicemonitors.monitoring.coreos.com &>/dev/null; do
-    if [ $ELAPSED -ge $MAX_CRD_WAIT ]; then
-        echo "  Warning: ServiceMonitor CRD not available after ${MAX_CRD_WAIT}s, continuing anyway..."
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-done
-echo "  ServiceMonitor CRD ready (${ELAPSED}s)"
+# Ensure ServiceMonitor CRD exists (install if kube-prometheus-stack not present)
+if ! kubectl get crd servicemonitors.monitoring.coreos.com &>/dev/null; then
+    echo "  ServiceMonitor CRD not found — installing..."
+    kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.68.0/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml 2>/dev/null || \
+    kubectl apply -f - <<'CRDEOF'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: servicemonitors.monitoring.coreos.com
+spec:
+  group: monitoring.coreos.com
+  names:
+    kind: ServiceMonitor
+    listKind: ServiceMonitorList
+    plural: servicemonitors
+    singular: servicemonitor
+  scope: Namespaced
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+CRDEOF
+    echo "  ServiceMonitor CRD installed"
+    sleep 3
+else
+    echo "  ServiceMonitor CRD already available"
+fi
 
 # ── B13: Broken ServiceMonitor with wrong selector ──
 echo "  B13: Creating broken ServiceMonitor..."
@@ -1297,19 +1313,45 @@ curl -sf -X POST "${GITEA_API}/repos/root/observability-stack/contents/charts/pr
     -d "{\"content\":\"$(echo "$PROMTAIL_VALUES" | base64 -w0)\",\"message\":\"Add promtail config\"}" \
     2>/dev/null || true
 
-# Wait for ArgoCD Application CRD to be available
-echo "  Waiting for ArgoCD Application CRD..."
-ELAPSED=0
-MAX_CRD_WAIT=300
-until kubectl get crd applications.argoproj.io &>/dev/null; do
-    if [ $ELAPSED -ge $MAX_CRD_WAIT ]; then
-        echo "  Warning: ArgoCD Application CRD not available after ${MAX_CRD_WAIT}s, continuing anyway..."
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-done
-echo "  ArgoCD Application CRD ready (${ELAPSED}s)"
+# Ensure ArgoCD Application CRD exists
+if ! kubectl get crd applications.argoproj.io &>/dev/null; then
+    echo "  ArgoCD Application CRD not found — installing..."
+    kubectl apply -f - <<'CRDEOF'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applications.argoproj.io
+spec:
+  group: argoproj.io
+  names:
+    kind: Application
+    listKind: ApplicationList
+    plural: applications
+    singular: application
+    shortNames:
+    - app
+    - apps
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+CRDEOF
+    echo "  ArgoCD Application CRD installed"
+    sleep 3
+else
+    echo "  ArgoCD Application CRD already available"
+fi
 
 # ── B17: ArgoCD Application with wrong source path ──
 echo "  B17: Creating ArgoCD Application with wrong path..."
