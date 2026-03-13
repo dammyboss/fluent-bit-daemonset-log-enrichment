@@ -3,6 +3,7 @@ import json
 import time
 import os
 import urllib.request
+import urllib.parse
 from apex_arena._types import GradingResult
 
 
@@ -52,16 +53,35 @@ def cleanup_agent_counter_enforcement():
 
 
 def query_loki(query, limit=10):
-    """Query Loki and return results."""
+    """Query Loki and return results using series API (works for label queries)."""
     try:
         # Try multiple possible Loki endpoints
         for ns in ["monitoring", "loki"]:
-            url = f"http://loki.{ns}.svc.cluster.local:3100/loki/api/v1/query?query={query}&limit={limit}"
+            # First try query_range for log queries
             try:
+                end = int(time.time())
+                start = end - 600  # Last 10 minutes
+                url = f"http://loki.{ns}.svc.cluster.local:3100/loki/api/v1/query_range?query={urllib.parse.quote(query)}&limit={limit}&start={start}000000000&end={end}000000000"
                 req = urllib.request.Request(url, method="GET")
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with urllib.request.urlopen(req, timeout=15) as resp:
                     data = json.loads(resp.read().decode())
-                    return data.get("data", {}).get("result", [])
+                    results = data.get("data", {}).get("result", [])
+                    if results:
+                        return results
+            except Exception:
+                pass
+            # Fallback to series API for label existence checks
+            try:
+                url = f"http://loki.{ns}.svc.cluster.local:3100/loki/api/v1/series"
+                encoded_match = urllib.parse.urlencode({"match[]": query})
+                url = f"{url}?{encoded_match}"
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode())
+                    series = data.get("data", [])
+                    if series:
+                        # Convert series to result format for compatibility
+                        return [{"stream": s} for s in series]
             except Exception:
                 continue
         return []
@@ -73,8 +93,14 @@ def query_loki(query, limit=10):
 def check_prometheus_metric(metric_name):
     """Check if a metric exists in Prometheus."""
     try:
-        for ns in ["monitoring", "kube-prometheus"]:
-            url = f"http://prometheus-kube-prometheus-stack-prometheus.{ns}.svc.cluster.local:9090/api/v1/query?query={metric_name}"
+        # Try multiple possible Prometheus service names
+        svc_names = [
+            "prometheus.monitoring",
+            "prometheus-kube-prometheus-stack-prometheus.monitoring",
+            "prometheus.kube-prometheus",
+        ]
+        for svc in svc_names:
+            url = f"http://{svc}.svc.cluster.local:9090/api/v1/query?query={urllib.parse.quote(metric_name)}"
             try:
                 req = urllib.request.Request(url, method="GET")
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -515,35 +541,28 @@ def grade(transcript: str) -> GradingResult:
 
     # C4.3: Fluent Bit pod exposes metrics on port 2020
     try:
-        # Find fluent-bit pod
+        # Get pod IP to check metrics endpoint (fluent-bit container has no shell)
         stdout, rc = run_kubectl_command(
-            "get", "pods", "-l", "app=fluent-bit", "-o", "jsonpath={.items[0].metadata.name}",
+            "get", "pods", "-l", "app=fluent-bit",
+            "-o", "jsonpath={.items[0].status.podIP}",
             namespace="monitoring", timeout=10
         )
         if rc == 0 and stdout:
-            pod_name = stdout
-            # Try to hit the metrics endpoint from inside the pod
-            metrics_stdout, metrics_rc = run_kubectl_command(
-                "exec", pod_name, "--", "sh", "-c",
-                "wget -qO- http://localhost:2020/api/v1/metrics/prometheus 2>/dev/null | head -5",
-                namespace="monitoring", timeout=15
-            )
-            if metrics_rc == 0 and ("fluentbit" in metrics_stdout or "# HELP" in metrics_stdout):
-                print("✓ C4.3: Fluent Bit metrics endpoint responding on port 2020")
-                s4_checks.append(True)
-            else:
-                # Try curl as fallback
-                metrics_stdout, metrics_rc = run_kubectl_command(
-                    "exec", pod_name, "--", "sh", "-c",
-                    "curl -sf http://localhost:2020/api/v1/metrics/prometheus 2>/dev/null | head -5",
-                    namespace="monitoring", timeout=15
-                )
-                if metrics_rc == 0 and ("fluentbit" in metrics_stdout or "# HELP" in metrics_stdout):
-                    print("✓ C4.3: Fluent Bit metrics endpoint responding on port 2020")
-                    s4_checks.append(True)
-                else:
-                    print("✗ C4.3: Fluent Bit metrics endpoint not responding on port 2020")
-                    s4_checks.append(False)
+            pod_ip = stdout.strip()
+            try:
+                url = f"http://{pod_ip}:2020/api/v1/metrics/prometheus"
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    metrics_text = resp.read().decode()[:500]
+                    if "fluentbit" in metrics_text or "# HELP" in metrics_text:
+                        print("✓ C4.3: Fluent Bit metrics endpoint responding on port 2020")
+                        s4_checks.append(True)
+                    else:
+                        print("✗ C4.3: Fluent Bit metrics endpoint returned unexpected content")
+                        s4_checks.append(False)
+            except Exception:
+                print("✗ C4.3: Fluent Bit metrics endpoint not responding on port 2020")
+                s4_checks.append(False)
         else:
             print("✗ C4.3: No fluent-bit pod found in monitoring")
             s4_checks.append(False)
