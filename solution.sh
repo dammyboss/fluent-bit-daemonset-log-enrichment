@@ -292,7 +292,6 @@ spec:
           mountPath: /fluent-bit/scripts/
         - name: varlog
           mountPath: /var/log
-          readOnly: true
         - name: node-info
           mountPath: /etc/node-info
           readOnly: true
