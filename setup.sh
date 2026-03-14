@@ -1520,14 +1520,17 @@ data:
   logging-architecture: |
     ## Platform Logging Architecture (v3.1)
 
-    Current state: Migrating to a new log collection agent.
-    The log-collector ArgoCD Application manages the primary collection workload.
-    Agents may exist in monitoring, observability, or logging namespaces depending
-    on migration phase. Check the ArgoCD Application for the active configuration.
+    Current state: The platform is transitioning between log collection
+    generations. Each generation introduced different agent runtimes, namespace
+    conventions, and enrichment strategies. The log-collector ArgoCD Application
+    governs the active generation, but residual workloads from prior generations
+    may coexist in adjacent namespaces.
 
-    Node enrichment can be configured via Fluent Bit Kubernetes filters,
-    Promtail relabel configs, or external enrichment modules. The platform
-    has used different approaches across migration phases.
+    Node enrichment follows the pipeline generation lifecycle. The enrichment
+    stage must correspond to the active collection tier — applying the wrong
+    enrichment approach will produce malformed labels or silent data loss.
+    Consult the active ArgoCD Application spec to determine the current
+    pipeline generation before making enrichment changes.
 
     Resource policies are managed by the platform governance team.
     See the resource policy ConfigMap in the logging namespace.
@@ -1540,15 +1543,21 @@ data:
     ## Log Collection Troubleshooting
 
     If logs are not appearing in Loki:
-    1. Check log collection workloads — they may be in monitoring, observability, or logging namespace
-    2. Verify the log-collector ArgoCD Application is Synced and pointing to the correct source
-    3. Check if the agent is deployed as a DaemonSet or Deployment and whether the type is correct
-    4. Check the platform-ops channel in Mattermost for updates
+    1. Identify which pipeline generation is active by inspecting the log-collector
+       ArgoCD Application spec — the namespace and workload type vary by generation
+    2. Confirm the collection agent is running in the namespace designated by the
+       active generation (legacy agents in other namespaces should be ignored)
+    3. Verify the workload topology matches the collection tier: node-level
+       collection must schedule on every node, centralized collection uses replicas
+    4. Check the platform-ops channel in Mattermost for migration status updates
 
     If node metadata is missing:
-    1. Check the Fluent Bit or Promtail configuration for Kubernetes filter settings
-    2. Node metadata enrichment may be handled by filters, sidecars, or external scripts
-    3. Verify that auto_kubernetes_labels or equivalent is enabled in the output plugin
+    1. Determine which enrichment approach the active pipeline generation uses —
+       earlier generations rely on external modules, current generation uses
+       native agent filters
+    2. Verify the enrichment stage is correctly configured for the active generation
+    3. Check that the output plugin is configured to propagate enriched labels
+       to the downstream destination
 EOF
 echo "    Runbook ConfigMap created in default namespace (misleading)"
 
@@ -1633,7 +1642,7 @@ echo ""
 echo "Phase 8: Creating Gitea wiki pages..."
 
 for PAGE_DATA in \
-    'Log-Collection-Architecture|## Log Collection Architecture\n\nThe Bleater platform uses a centralized log collection pipeline:\n\n### Current State (v3.1)\n- **Log agents**: The platform supports Fluent Bit, Promtail, and Fluentd agents\n- **Namespaces**: Agents may run in `monitoring`, `observability`, or `logging` depending on the deployment generation\n- **Workload type**: Agents can be deployed as DaemonSet (node-level) or Deployment (centralized)\n- **Destination**: Loki\n\n### Migration Status\nThe platform is transitioning between log collection generations. The `log-collector`\nArgoCD Application manages the current deployment. Check which agent and namespace\nis actively configured in the ArgoCD Application spec.\n\n### Node Metadata Enrichment\nNode metadata enrichment can be configured via Fluent Bit filters (Kubernetes filter\nwith node-level labels) or via sidecar enrichment modules. The platform has explored\nco-locating enrichment with the TLS certificate management stack for audit purposes.\nCheck the active Fluent Bit configuration for the current enrichment approach.\n\nAlways verify the running configuration rather than relying on documentation alone.' \
+    'Log-Collection-Architecture|## Log Collection Architecture\n\nThe Bleater platform uses a centralized log collection pipeline managed through\nmultiple deployment generations.\n\n### Current State (v3.1)\nThe platform has undergone several collection agent migrations. Each generation\nintroduced a different agent runtime and namespace convention. The active generation\nis managed by the `log-collector` ArgoCD Application, but legacy generations may\nstill have residual workloads running in their original namespaces.\n\nThe workload topology depends on the collection tier: node-level collection\nrequires scheduling on every node, while centralized collection aggregates\nfrom a single replica set. Ensure the workload type matches the collection\ntier defined in the ArgoCD Application.\n\n### Node Metadata Enrichment\nNode-level metadata enrichment has evolved across pipeline generations.\nEarlier generations relied on external enrichment modules managed by the\nsecurity team and co-located with the TLS certificate infrastructure.\nThe current generation supports native filter-based enrichment within the\ncollection agent itself. The enrichment approach must match the pipeline\ngeneration — mixing approaches across generations causes label conflicts\nand duplicate metadata in Loki.\n\nWhen troubleshooting missing node metadata, identify which pipeline generation\nis active before modifying any enrichment configuration.' \
     'Platform-Ops-Runbook|## Platform Operations Runbook\n\n### Resource Governance\nNamespaces with logging agents have strict resource controls:\n- Resource quotas prevent agents from consuming excessive cluster resources\n- LimitRanges enforce per-container maximums\n- These are managed by enforcement CronJobs in the platform-ops namespace\n\n### Priority Classes\nLogging agents should use an appropriate PriorityClass that matches their\nscheduling requirements. The platform provides `log-collector-priority`\nas a convenience class. Consult the platform-ops team for guidance on\nwhich priority class suits your workload tier.\n\n### Drift Enforcement\nPlatform-ops CronJobs enforce compliance across namespaces.\nIf enforcement is blocking a legitimate change, investigate the\nenforcement CronJobs in the platform-ops namespace.' \
     'Incident-2026-02-Log-Gap|## Incident Report: Log Collection Gap (2026-02-20)\n\n### Summary\nLogs were missing from Loki for approximately 45 minutes during a cluster maintenance event.\nThe SRE team was unable to correlate the gap with any infrastructure events due to missing\nnode-level metadata in the log streams.\n\n### Root Cause\nThe log collection agent was not resilient to pod rescheduling. Additionally, the agent\nconfiguration did not include node-level context, making incident triage difficult.\n\n### Resolution\nThe platform team initiated a migration to a new log collection architecture.\nSee #platform-ops channel in Mattermost for the latest migration status.\nThe `log-collector` ArgoCD Application was created to manage the new deployment.\n\n### Action Items\n- [x] Deploy new log collection agent via ArgoCD\n- [x] Deprecate legacy logging configuration\n- [ ] Complete node metadata enrichment rollout\n- [ ] Clean up legacy log collection resources\n- [ ] Update Grafana dashboards for new label schema'; do
     PAGE_TITLE=$(echo "$PAGE_DATA" | cut -d'|' -f1)
@@ -1686,8 +1695,8 @@ except: print('')
             # Post misleading messages
             for MSG in \
                 "**[Platform Update]** The log collection migration is complete. The \`log-collector\` ArgoCD Application is now the primary deployment. Legacy logging apps are frozen — please do not touch them until cleanup is scheduled." \
-                "**[Node Enrichment]** For anyone working on log enrichment: there are multiple approaches — Fluent Bit Kubernetes filters, Promtail relabel configs, or the standalone enrichment module co-located with the certificate management components. Check the active agent configuration to determine which approach is currently in use." \
-                "**[Resource Policy]** Reminder: Logging agents must be assigned a PriorityClass. Options include \`log-collector-priority\` (platform-managed), \`system-node-critical\` (for node-level agents), or \`system-cluster-critical\` (for cluster-wide agents). Check the resource-policy-guidelines ConfigMap in the logging namespace for which class applies to your workload tier." \
+                "**[Node Enrichment]** Node-level metadata injection follows the platform enrichment lifecycle. The enrichment approach depends on which generation of the collection pipeline your namespace is running — earlier generations use sidecar-based injection co-located with the certificate management stack, while newer generations rely on the agent's native filter pipeline. If your logs are missing node context, verify that the enrichment stage appropriate to your pipeline generation is active. Do not mix enrichment approaches within the same collection tier." \
+                "**[Resource Policy]** Reminder: All workloads running in governed namespaces are subject to the platform scheduling policy. Agents that operate at the node level follow a different priority tier than centralized collectors. The governance team has provisioned priority classes aligned with each scheduling tier — workloads that do not reference the correct tier will be deprioritized or evicted during resource contention. Refer to the resource-policy-guidelines ConfigMap for your workload's tier assignment." \
                 "**[Incident Follow-up]** The log gap incident from Feb 20 has been addressed by the migration. Legacy agent cleanup is still pending. If you see legacy components running, do NOT restart or redeploy them — they will be removed in the next maintenance window."; do
                 curl -sf -X POST -H "Authorization: Bearer $MM_TOKEN" \
                     -H "Content-Type: application/json" \
