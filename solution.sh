@@ -117,6 +117,9 @@ echo ""
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Step 5: Creating Fluent Bit ConfigMap with node enrichment and metrics..."
 
+# Delete old ConfigMap to avoid merge issues
+kubectl delete configmap fluent-bit-config -n "$MON_NS" 2>/dev/null || true
+
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -135,12 +138,12 @@ data:
         HTTP_Server  On
         HTTP_Listen  0.0.0.0
         HTTP_Port    2020
-        Parsers_File parsers.conf
+        Parsers_File /fluent-bit/etc/parsers.conf
 
     [INPUT]
         Name              tail
         Path              /var/log/containers/*.log
-        Parser            docker
+        multiline.parser  cri
         Tag               kube.*
         Refresh_Interval  5
         Skip_Long_Lines   On
@@ -156,10 +159,11 @@ data:
         K8S-Logging.Exclude On
 
     [FILTER]
-        Name    lua
-        Match   kube.*
-        script  /fluent-bit/scripts/node-enrichment.lua
-        call    enrich_with_node_metadata
+        Name          record_modifier
+        Match         kube.*
+        Record        node_name \${NODE_NAME}
+        Record        kernel_version \${KERNEL_VERSION}
+        Record        node_labels \${NODE_LABELS}
 
     [OUTPUT]
         Name              loki
@@ -167,7 +171,7 @@ data:
         Host              loki.${MON_NS}.svc.cluster.local
         Port              3100
         Labels            job=fluent-bit
-        label_keys         \$node_name,\$kernel_version,\$node_labels
+        label_keys        node_name,kernel_version,node_labels
         auto_kubernetes_labels on
         line_format       json
 
@@ -179,41 +183,15 @@ data:
         Time_Format %Y-%m-%dT%H:%M:%S.%L
         Time_Keep   On
 
-  node-enrichment.lua: |
-    -- Node metadata enrichment for Fluent Bit
-    -- Reads node info from downward API environment variables
-
-    function enrich_with_node_metadata(tag, timestamp, record)
-        -- NODE_NAME is injected via downward API fieldRef
-        local node_name = os.getenv("NODE_NAME")
-        if node_name ~= nil and node_name ~= "" then
-            record["node_name"] = node_name
-        end
-
-        -- KERNEL_VERSION is injected via downward API (read from /etc/node-info)
-        local kv_file = io.open("/etc/node-info/kernel_version", "r")
-        if kv_file ~= nil then
-            local kv = kv_file:read("*all")
-            kv_file:close()
-            if kv ~= nil then
-                record["kernel_version"] = kv:gsub("%s+$", "")
-            end
-        end
-
-        -- NODE_LABELS is injected via downward API
-        local nl_file = io.open("/etc/node-info/node_labels", "r")
-        if nl_file ~= nil then
-            local nl = nl_file:read("*all")
-            nl_file:close()
-            if nl ~= nil then
-                record["node_labels"] = nl:gsub("%s+$", "")
-            end
-        end
-
-        return 1, timestamp, record
-    end
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Keep   On
 EOF
-echo "  ✓ Fluent Bit ConfigMap created with Lua enrichment + HTTP_Server On"
+echo "  ✓ Fluent Bit ConfigMap created with record_modifier enrichment + HTTP_Server On"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,6 +204,10 @@ echo ""
 # - With downward API for node metadata
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Step 6: Deploying Fluent Bit DaemonSet..."
+
+# Delete existing DaemonSet to avoid merge issues with immutable fields
+kubectl delete daemonset fluent-bit -n "$MON_NS" 2>/dev/null || true
+sleep 3
 
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
@@ -255,10 +237,37 @@ spec:
       priorityClassName: system-node-critical
       tolerations:
       - operator: Exists
+      initContainers:
+      - name: node-info-collector
+        image: bitnami/kubectl:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - |
+          KERNEL=\$(kubectl get node \$NODE_NAME -o jsonpath='{.status.nodeInfo.kernelVersion}' 2>/dev/null || uname -r)
+          echo -n "\$KERNEL" > /node-info/kernel_version
+          kubectl get node \$NODE_NAME -o go-template='{{range \$k, \$v := .metadata.labels}}{{printf "%s=%s," \$k \$v}}{{end}}' 2>/dev/null | sed 's/,\$//' > /node-info/node_labels
+          echo "Node info collected: kernel=\$KERNEL"
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: node-info
+          mountPath: /node-info
       containers:
       - name: fluent-bit
         image: fluent/fluent-bit:2.1
         imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - |
+          export KERNEL_VERSION=\$(cat /etc/node-info/kernel_version 2>/dev/null || echo unknown)
+          export NODE_LABELS=\$(cat /etc/node-info/node_labels 2>/dev/null || echo unknown)
+          exec /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluent-bit.conf
         env:
         - name: NODE_NAME
           valueFrom:
@@ -275,53 +284,29 @@ spec:
           limits:
             cpu: 500m
             memory: 256Mi
+        securityContext:
+          runAsUser: 0
         volumeMounts:
         - name: config
           mountPath: /fluent-bit/etc/
-        - name: lua-scripts
-          mountPath: /fluent-bit/scripts/
         - name: varlog
           mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
         - name: node-info
           mountPath: /etc/node-info
           readOnly: true
-      initContainers:
-      - name: node-info-collector
-        image: bitnami/kubectl:latest
-        imagePullPolicy: IfNotPresent
-        command:
-        - /bin/sh
-        - -c
-        - |
-          # Collect node metadata and write to shared volume
-          NODE=\$(cat /etc/hostname 2>/dev/null || echo "\$NODE_NAME")
-          # Get kernel version from node object
-          KERNEL=\$(kubectl get node \$NODE_NAME -o jsonpath='{.status.nodeInfo.kernelVersion}' 2>/dev/null || uname -r)
-          echo -n "\$KERNEL" > /node-info/kernel_version
-          # Get node labels using go-template (no python3 needed)
-          kubectl get node \$NODE_NAME -o go-template='{{range \$k, \$v := .metadata.labels}}{{printf "%s=%s," \$k \$v}}{{end}}' 2>/dev/null | sed 's/,$//' > /node-info/node_labels
-          echo "Node info collected: kernel=\$KERNEL"
-        env:
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
-        volumeMounts:
-        - name: node-info
-          mountPath: /node-info
       volumes:
       - name: config
         configMap:
           name: fluent-bit-config
-      - name: lua-scripts
-        configMap:
-          name: fluent-bit-config
-          items:
-          - key: node-enrichment.lua
-            path: node-enrichment.lua
       - name: varlog
         hostPath:
           path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
       - name: node-info
         emptyDir: {}
 EOF
