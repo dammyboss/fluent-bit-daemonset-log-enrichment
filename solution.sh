@@ -3,6 +3,16 @@
 # Fixes all 20 breakages across 5 subscores
 set -e
 
+# Ubuntu user needs sudo for kubectl (cluster-scoped operations)
+# Create wrapper so all kubectl calls go through sudo
+mkdir -p /tmp/bin
+cat > /tmp/bin/kubectl <<'WRAPPER'
+#!/bin/bash
+exec sudo /usr/local/bin/kubectl "$@"
+WRAPPER
+chmod +x /tmp/bin/kubectl
+export PATH="/tmp/bin:$PATH"
+
 NS="bleater"
 MON_NS="monitoring"
 LOG_NS="logging"
