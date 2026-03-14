@@ -1,7 +1,6 @@
 import subprocess
 import json
 import time
-import os
 import urllib.request
 import urllib.parse
 from apex_arena._types import GradingResult
@@ -207,24 +206,30 @@ def grade(transcript: str) -> GradingResult:
         print(f"✗ C1.3: Error: {e}")
         s1_checks.append(False)
 
-    # C1.4: Enforcer files removed from host
+    # C1.4: Enforcer CronJobs and Deployment deleted from platform-ops
     try:
-        enforcer_files = [
-            "/etc/cron.d/log-collector-reconciler",
-            "/etc/cron.d/logging-policy-enforcer",
-            "/etc/cron.d/node-taint-enforcer",
-            "/var/lib/rancher/k3s/agent/pod-manifests/log-collector-enforcer.yaml",
-        ]
         enforcers_found = []
-        for fp in enforcer_files:
-            if os.path.exists(fp):
-                enforcers_found.append(fp)
+        # Check enforcer Deployment
+        _, rc = run_kubectl_command(
+            "get", "deployment", "log-governance-controller",
+            namespace="platform-ops", timeout=5
+        )
+        if rc == 0:
+            enforcers_found.append("deployment/log-governance-controller")
+        # Check enforcer CronJobs
+        for cj in ["log-collector-reconciler", "logging-policy-enforcer", "node-taint-enforcer"]:
+            _, rc = run_kubectl_command(
+                "get", "cronjob", cj,
+                namespace="platform-ops", timeout=5
+            )
+            if rc == 0:
+                enforcers_found.append(f"cronjob/{cj}")
 
         if not enforcers_found:
-            print("✓ C1.4: All enforcer files removed from host")
+            print("✓ C1.4: All enforcer CronJobs and Deployment deleted")
             s1_checks.append(True)
         else:
-            print(f"✗ C1.4: Enforcer files still present: {enforcers_found}")
+            print(f"✗ C1.4: Enforcers still present: {enforcers_found}")
             s1_checks.append(False)
     except Exception as e:
         print(f"✗ C1.4: Error: {e}")

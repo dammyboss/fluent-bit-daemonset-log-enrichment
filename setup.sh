@@ -221,106 +221,106 @@ NODE_NAME=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
 kubectl taint node "$NODE_NAME" node-role.kubernetes.io/log-collector=true:NoSchedule --overwrite 2>/dev/null || true
 echo "    Taint added: node-role.kubernetes.io/log-collector=true:NoSchedule"
 
-# ── B3: Static pod enforcer that re-creates the Deployment ──
-echo "  B3: Creating static pod enforcer..."
+# ── B3: Deployment-based enforcer that re-creates the Deployment ──
+echo "  B3: Creating enforcer Deployment in platform-ops..."
 
-MANIFEST_DIR="/var/lib/rancher/k3s/agent/pod-manifests"
-mkdir -p "$MANIFEST_DIR"
-
-cat > "$MANIFEST_DIR/log-collector-enforcer.yaml" <<'STATICPOD'
+kubectl apply -f - <<EOF
 apiVersion: v1
-kind: Pod
+kind: ConfigMap
 metadata:
-  name: log-collector-enforcer
-  namespace: kube-system
-  labels:
-    app: log-collector-enforcer
-    tier: platform-control
-spec:
-  hostNetwork: true
-  containers:
-  - name: enforcer
-    image: bitnami/kubectl:latest
-    imagePullPolicy: IfNotPresent
-    command:
-    - /bin/sh
-    - -c
-    - |
-      while true; do
-        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-        # If a DaemonSet named fluent-bit exists in monitoring, delete it
-        if kubectl get daemonset fluent-bit -n monitoring 2>/dev/null; then
-          kubectl delete daemonset fluent-bit -n monitoring --grace-period=0 2>/dev/null
-        fi
-        # Ensure the Deployment exists in logging
-        if ! kubectl get deployment fluent-bit -n logging 2>/dev/null; then
-          kubectl apply -f /etc/fluent-bit-enforcer/deployment.yaml 2>/dev/null
-        fi
-        sleep 60
-      done
-    volumeMounts:
-    - name: kubeconfig
-      mountPath: /etc/rancher/k3s/k3s.yaml
-      readOnly: true
-    - name: enforcer-manifests
-      mountPath: /etc/fluent-bit-enforcer
-      readOnly: true
-  volumes:
-  - name: kubeconfig
-    hostPath:
-      path: /etc/rancher/k3s/k3s.yaml
-      type: File
-  - name: enforcer-manifests
-    hostPath:
-      path: /etc/fluent-bit-enforcer
-      type: Directory
-  tolerations:
-  - operator: Exists
-  priorityClassName: system-node-critical
-STATICPOD
-
-# Create the manifests the static pod uses
-mkdir -p /etc/fluent-bit-enforcer
-cat > /etc/fluent-bit-enforcer/deployment.yaml <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: fluent-bit
-  namespace: $LOG_NS
-  labels:
-    app: fluent-bit
-    app.kubernetes.io/name: fluent-bit
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: fluent-bit
-  template:
+  name: log-governance-manifest
+  namespace: $OPS_NS
+data:
+  deployment.yaml: |
+    apiVersion: apps/v1
+    kind: Deployment
     metadata:
+      name: fluent-bit
+      namespace: logging
       labels:
         app: fluent-bit
         app.kubernetes.io/name: fluent-bit
     spec:
-      serviceAccountName: fluent-bit
+      replicas: 1
+      selector:
+        matchLabels:
+          app: fluent-bit
+      template:
+        metadata:
+          labels:
+            app: fluent-bit
+            app.kubernetes.io/name: fluent-bit
+        spec:
+          serviceAccountName: fluent-bit
+          containers:
+          - name: fluent-bit
+            image: fluent/fluent-bit:2.1
+            imagePullPolicy: IfNotPresent
+            volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+          volumes:
+          - name: config
+            configMap:
+              name: fluent-bit-config
+          - name: varlog
+            hostPath:
+              path: /var/log
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-governance-controller
+  namespace: $OPS_NS
+  labels:
+    app.kubernetes.io/managed-by: platform-ops
+    purpose: resource-governance
+    component: log-governance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-governance-controller
+  template:
+    metadata:
+      labels:
+        app: log-governance-controller
+        component: log-governance
+    spec:
+      serviceAccountName: log-reconciler-sa
       containers:
-      - name: fluent-bit
-        image: fluent/fluent-bit:2.1
+      - name: controller
+        image: bitnami/kubectl:latest
         imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            # If a DaemonSet named fluent-bit exists in monitoring, delete it
+            if kubectl get daemonset fluent-bit -n monitoring 2>/dev/null; then
+              echo "Non-compliant DaemonSet found — removing"
+              kubectl delete daemonset fluent-bit -n monitoring --grace-period=0 2>/dev/null
+            fi
+            # Ensure the Deployment exists in logging
+            if ! kubectl get deployment fluent-bit -n logging 2>/dev/null; then
+              echo "Fluent Bit Deployment missing — recreating"
+              kubectl apply -f /manifests/deployment.yaml 2>/dev/null
+            fi
+            sleep 60
+          done
         volumeMounts:
-        - name: config
-          mountPath: /fluent-bit/etc/
-        - name: varlog
-          mountPath: /var/log
-          readOnly: true
+        - name: manifest
+          mountPath: /manifests
       volumes:
-      - name: config
+      - name: manifest
         configMap:
-          name: fluent-bit-config
-      - name: varlog
-        hostPath:
-          path: /var/log
+          name: log-governance-manifest
 EOF
-echo "    Static pod enforcer manifest created"
+echo "    Enforcer Deployment log-governance-controller created in $OPS_NS"
 
 # ── B4: CronJob that deletes DaemonSet and re-creates Deployment ──
 echo "  B4: Creating CronJob enforcer in platform-ops..."
@@ -408,6 +408,9 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps", "serviceaccounts"]
   verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -465,12 +468,6 @@ spec:
 EOF
 echo "    CronJob log-collector-reconciler created in $OPS_NS"
 
-# Also create host-level cron as backup enforcer
-cat > /etc/cron.d/log-collector-reconciler <<'CRON'
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-* * * * * root /usr/local/bin/kubectl delete daemonset fluent-bit -n monitoring 2>/dev/null; /usr/local/bin/kubectl get deployment fluent-bit -n logging 2>/dev/null || /usr/local/bin/kubectl apply -f /etc/fluent-bit-enforcer/deployment.yaml 2>/dev/null
-CRON
-echo "    Host cron enforcer: /etc/cron.d/log-collector-reconciler"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -758,11 +755,11 @@ data:
     ## Logging Agent Resource Policy (v3.2)
 
     All logging agents deployed via the platform-ops pipeline MUST:
-    1. Use priorityClassName: log-collector-priority (platform standard)
+    1. Use an appropriate PriorityClass for their scheduling tier
     2. Respect the namespace resource quota limits
     3. Stay within LimitRange bounds set by the governance team
-    4. NOT use reserved system-level priority classes
-       (these are locked down for core infrastructure only)
+    4. Priority configuration should follow the platform's scheduling
+       governance model — consult platform-ops for the approved class
     5. Be deployed via the designated ArgoCD Application — manual kubectl
        deployments are non-compliant and will be reverted by enforcement
 
@@ -865,58 +862,39 @@ spec:
 EOF
 echo "    CronJob logging-policy-enforcer created in $OPS_NS"
 
-# Host-level cron as backup
-cat > /etc/cron.d/logging-policy-enforcer <<'CRON'
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-* * * * * root /usr/local/bin/kubectl apply -f /etc/logging-governance/quota.yaml 2>/dev/null; /usr/local/bin/kubectl apply -f /etc/logging-governance/limitrange.yaml 2>/dev/null
-CRON
-
-mkdir -p /etc/logging-governance
-cat > /etc/logging-governance/quota.yaml <<EOF
-apiVersion: v1
-kind: ResourceQuota
+# Add a CronJob that re-applies the node taint
+kubectl apply -f - <<EOF
+apiVersion: batch/v1
+kind: CronJob
 metadata:
-  name: logging-resource-quota
-  namespace: $MON_NS
+  name: node-taint-enforcer
+  namespace: $OPS_NS
   labels:
     app.kubernetes.io/managed-by: platform-governance
+    purpose: resource-governance
 spec:
-  hard:
-    requests.cpu: "100m"
-    requests.memory: "128Mi"
-    limits.cpu: "200m"
-    limits.memory: "256Mi"
+  schedule: "* * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 50
+      template:
+        spec:
+          serviceAccountName: log-reconciler-sa
+          containers:
+          - name: enforcer
+            image: bitnami/kubectl:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -c
+            - |
+              NODE=\$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+              kubectl taint node \$NODE node-role.kubernetes.io/log-collector=true:NoSchedule --overwrite 2>/dev/null
+          restartPolicy: Never
 EOF
-
-cat > /etc/logging-governance/limitrange.yaml <<EOF
-apiVersion: v1
-kind: LimitRange
-metadata:
-  name: log-agent-governance
-  namespace: $MON_NS
-  labels:
-    app.kubernetes.io/managed-by: platform-governance
-spec:
-  limits:
-  - type: Container
-    max:
-      cpu: "50m"
-      memory: "64Mi"
-    default:
-      cpu: "25m"
-      memory: "32Mi"
-    defaultRequest:
-      cpu: "10m"
-      memory: "16Mi"
-EOF
-echo "    Host cron enforcer: /etc/cron.d/logging-policy-enforcer"
-
-# Also add a cron that re-applies the node taint
-cat > /etc/cron.d/node-taint-enforcer <<'CRON'
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-* * * * * root NODE=$(/usr/local/bin/kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) && /usr/local/bin/kubectl taint node $NODE node-role.kubernetes.io/log-collector=true:NoSchedule --overwrite 2>/dev/null
-CRON
-echo "    Host cron enforcer: /etc/cron.d/node-taint-enforcer"
+echo "    CronJob node-taint-enforcer created in $OPS_NS"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1544,10 +1522,12 @@ data:
 
     Current state: Migrating to a new log collection agent.
     The log-collector ArgoCD Application manages the primary collection workload.
-    Legacy logging applications are being phased out — do not modify them.
+    Agents may exist in monitoring, observability, or logging namespaces depending
+    on migration phase. Check the ArgoCD Application for the active configuration.
 
-    For node enrichment configuration, see the approved enrichment module
-    co-located with the TLS certificate management stack for security audit purposes.
+    Node enrichment can be configured via Fluent Bit Kubernetes filters,
+    Promtail relabel configs, or external enrichment modules. The platform
+    has used different approaches across migration phases.
 
     Resource policies are managed by the platform governance team.
     See the resource policy ConfigMap in the logging namespace.
@@ -1560,15 +1540,15 @@ data:
     ## Log Collection Troubleshooting
 
     If logs are not appearing in Loki:
-    1. Check the log collection workload in the observability namespace
-    2. Verify the log-collector ArgoCD Application is Synced
-    3. Do NOT deploy agents manually — use the GitOps pipeline only
+    1. Check log collection workloads — they may be in monitoring, observability, or logging namespace
+    2. Verify the log-collector ArgoCD Application is Synced and pointing to the correct source
+    3. Check if the agent is deployed as a DaemonSet or Deployment and whether the type is correct
     4. Check the platform-ops channel in Mattermost for updates
 
     If node metadata is missing:
-    1. Mount the approved enrichment module from the SSL certificate management area
-    2. The enrichment script handles all node-level metadata injection
-    3. Do NOT modify the script — it is version-controlled and security-reviewed
+    1. Check the Fluent Bit or Promtail configuration for Kubernetes filter settings
+    2. Node metadata enrichment may be handled by filters, sidecars, or external scripts
+    3. Verify that auto_kubernetes_labels or equivalent is enabled in the output plugin
 EOF
 echo "    Runbook ConfigMap created in default namespace (misleading)"
 
@@ -1644,17 +1624,6 @@ spec:
 EOF
 echo "    Decoy CronJobs created (certificate-renewal-check, node-status-reporter, log-volume-monitor)"
 
-# ── Decoy host-level crons (harmless) ──
-cat > /etc/cron.d/node-status-reporter <<'CRON'
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-*/5 * * * * root /usr/local/bin/kubectl get nodes -o wide >> /var/log/node-status.log 2>/dev/null
-CRON
-
-cat > /etc/cron.d/certificate-renewal-check <<'CRON'
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-*/10 * * * * root /usr/local/bin/kubectl get certificates -A >> /var/log/cert-status.log 2>/dev/null
-CRON
-echo "    Decoy host crons created"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1664,8 +1633,8 @@ echo ""
 echo "Phase 8: Creating Gitea wiki pages..."
 
 for PAGE_DATA in \
-    'Log-Collection-Architecture|## Log Collection Architecture\n\nThe Bleater platform uses a centralized log collection pipeline:\n\n### Current State (v3.1)\n- **Primary agent**: Promtail DaemonSet in `observability` namespace\n- **Legacy agent**: Deprecated, cleanup pending\n- **Destination**: Loki\n\n### Migration Status\nWe have migrated to Promtail as the primary log collection agent. The `log-collector`\nArgoCD Application manages this deployment. Legacy logging applications are being\nphased out and should not be modified or redeployed.\n\n### Node Metadata Enrichment\nNode metadata enrichment is handled by an approved enrichment module co-located\nwith the TLS certificate management stack for security audit compliance. This module\nwas reviewed by the security team and should be used as-is.\n\n**DO NOT** write custom enrichment scripts — use the approved module.' \
-    'Platform-Ops-Runbook|## Platform Operations Runbook\n\n### Resource Governance\nNamespaces with logging agents have strict resource controls:\n- Resource quotas prevent agents from consuming excessive cluster resources\n- LimitRanges enforce per-container maximums\n- These are managed by enforcement CronJobs and MUST NOT be deleted or modified\n\n### Priority Classes\nAll logging agents MUST use `log-collector-priority` PriorityClass.\nReserved system-level priority classes are locked down for core infrastructure\nonly. Using them for application workloads violates platform policy and will\nbe flagged by the governance automation.\n\n### Drift Enforcement\nPlatform-ops CronJobs enforce compliance across namespaces.\nDo NOT delete these CronJobs — they ensure resource policies stay in place.\nIf enforcement is blocking a legitimate change, file a ticket with platform-ops.' \
+    'Log-Collection-Architecture|## Log Collection Architecture\n\nThe Bleater platform uses a centralized log collection pipeline:\n\n### Current State (v3.1)\n- **Log agents**: The platform supports Fluent Bit, Promtail, and Fluentd agents\n- **Namespaces**: Agents may run in `monitoring`, `observability`, or `logging` depending on the deployment generation\n- **Workload type**: Agents can be deployed as DaemonSet (node-level) or Deployment (centralized)\n- **Destination**: Loki\n\n### Migration Status\nThe platform is transitioning between log collection generations. The `log-collector`\nArgoCD Application manages the current deployment. Check which agent and namespace\nis actively configured in the ArgoCD Application spec.\n\n### Node Metadata Enrichment\nNode metadata enrichment can be configured via Fluent Bit filters (Kubernetes filter\nwith node-level labels) or via sidecar enrichment modules. The platform has explored\nco-locating enrichment with the TLS certificate management stack for audit purposes.\nCheck the active Fluent Bit configuration for the current enrichment approach.\n\nAlways verify the running configuration rather than relying on documentation alone.' \
+    'Platform-Ops-Runbook|## Platform Operations Runbook\n\n### Resource Governance\nNamespaces with logging agents have strict resource controls:\n- Resource quotas prevent agents from consuming excessive cluster resources\n- LimitRanges enforce per-container maximums\n- These are managed by enforcement CronJobs in the platform-ops namespace\n\n### Priority Classes\nLogging agents should use an appropriate PriorityClass that matches their\nscheduling requirements. The platform provides `log-collector-priority`\nas a convenience class. Consult the platform-ops team for guidance on\nwhich priority class suits your workload tier.\n\n### Drift Enforcement\nPlatform-ops CronJobs enforce compliance across namespaces.\nIf enforcement is blocking a legitimate change, investigate the\nenforcement CronJobs in the platform-ops namespace.' \
     'Incident-2026-02-Log-Gap|## Incident Report: Log Collection Gap (2026-02-20)\n\n### Summary\nLogs were missing from Loki for approximately 45 minutes during a cluster maintenance event.\nThe SRE team was unable to correlate the gap with any infrastructure events due to missing\nnode-level metadata in the log streams.\n\n### Root Cause\nThe log collection agent was not resilient to pod rescheduling. Additionally, the agent\nconfiguration did not include node-level context, making incident triage difficult.\n\n### Resolution\nThe platform team initiated a migration to a new log collection architecture.\nSee #platform-ops channel in Mattermost for the latest migration status.\nThe `log-collector` ArgoCD Application was created to manage the new deployment.\n\n### Action Items\n- [x] Deploy new log collection agent via ArgoCD\n- [x] Deprecate legacy logging configuration\n- [ ] Complete node metadata enrichment rollout\n- [ ] Clean up legacy log collection resources\n- [ ] Update Grafana dashboards for new label schema'; do
     PAGE_TITLE=$(echo "$PAGE_DATA" | cut -d'|' -f1)
     PAGE_CONTENT=$(echo "$PAGE_DATA" | cut -d'|' -f2-)
@@ -1717,8 +1686,8 @@ except: print('')
             # Post misleading messages
             for MSG in \
                 "**[Platform Update]** The log collection migration is complete. The \`log-collector\` ArgoCD Application is now the primary deployment. Legacy logging apps are frozen — please do not touch them until cleanup is scheduled." \
-                "**[Node Enrichment]** For anyone working on log enrichment: the approved enrichment module lives alongside the certificate management components (security team wanted it co-located for audit). Please do not create alternative implementations — use the approved version only." \
-                "**[Resource Policy]** Reminder: All agents deployed in namespaces with resource governance must use the \`log-collector-priority\` PriorityClass. System priority classes are reserved for control plane only. See the resource policy ConfigMap for details." \
+                "**[Node Enrichment]** For anyone working on log enrichment: there are multiple approaches — Fluent Bit Kubernetes filters, Promtail relabel configs, or the standalone enrichment module co-located with the certificate management components. Check the active agent configuration to determine which approach is currently in use." \
+                "**[Resource Policy]** Reminder: Logging agents must be assigned a PriorityClass. Options include \`log-collector-priority\` (platform-managed), \`system-node-critical\` (for node-level agents), or \`system-cluster-critical\` (for cluster-wide agents). Check the resource-policy-guidelines ConfigMap in the logging namespace for which class applies to your workload tier." \
                 "**[Incident Follow-up]** The log gap incident from Feb 20 has been addressed by the migration. Legacy agent cleanup is still pending. If you see legacy components running, do NOT restart or redeploy them — they will be removed in the next maintenance window."; do
                 curl -sf -X POST -H "Authorization: Bearer $MM_TOKEN" \
                     -H "Content-Type: application/json" \
@@ -1750,14 +1719,12 @@ default
 EOF
 chown ubuntu:ubuntu /home/ubuntu/.allowed_namespaces
 
-# Grant ubuntu sudo for kubectl, rm, and tee (needed for kube-system, CRDs, cron files, config)
-echo "ubuntu ALL=(ALL) NOPASSWD: /usr/local/bin/kubectl, /bin/rm, /usr/bin/rm, /usr/bin/tee, /bin/cat, /usr/bin/cat" > /etc/sudoers.d/ubuntu-ops
-chmod 440 /etc/sudoers.d/ubuntu-ops
-echo "  Sudo permissions configured"
-
-# Ensure cron daemon is running
-service cron start 2>/dev/null || systemctl start cron 2>/dev/null || true
-echo "  Cron daemon started"
+# Create kubeconfig for ubuntu user (agent uses regular kubectl, no sudo)
+mkdir -p /home/ubuntu/.kube
+cp /etc/rancher/k3s/k3s.yaml /home/ubuntu/.kube/config
+chown -R ubuntu:ubuntu /home/ubuntu/.kube
+chmod 600 /home/ubuntu/.kube/config
+echo "  Ubuntu kubeconfig configured at /home/ubuntu/.kube/config"
 
 # Strip last-applied-configuration annotations
 for ns in "$LOG_NS" "$MON_NS" "$OPS_NS" "$OBS_NS"; do
@@ -1808,12 +1775,8 @@ echo "ArgoCD Applications:"
 kubectl get applications -n argocd 2>/dev/null
 
 echo ""
-echo "Host cron files:"
-ls -la /etc/cron.d/
-
-echo ""
-echo "Static pod manifests:"
-ls -la "$MANIFEST_DIR/"
+echo "Enforcer Deployment in platform-ops:"
+kubectl get deployment log-governance-controller -n "$OPS_NS" 2>/dev/null || echo "  Not found"
 
 echo ""
 echo "=== Setup Complete ==="

@@ -3,15 +3,7 @@
 # Fixes all 20 breakages across 5 subscores
 set -e
 
-# Ubuntu user needs sudo for kubectl (cluster-scoped operations)
-# Create wrapper so all kubectl calls go through sudo
-mkdir -p /tmp/bin
-cat > /tmp/bin/kubectl <<'WRAPPER'
-#!/bin/bash
-exec sudo /usr/local/bin/kubectl "$@"
-WRAPPER
-chmod +x /tmp/bin/kubectl
-export PATH="/tmp/bin:$PATH"
+export KUBECONFIG=/home/ubuntu/.kube/config
 
 NS="bleater"
 MON_NS="monitoring"
@@ -28,28 +20,15 @@ echo ""
 # ─────────────────────────────────────────────────────────────────────────────
 echo "Step 1: Neutralizing drift enforcers..."
 
-# 1a: Remove the static pod enforcer manifest (B3)
-echo "  Removing static pod enforcer..."
-sudo rm -f /var/lib/rancher/k3s/agent/pod-manifests/log-collector-enforcer.yaml
-sudo rm -rf /etc/fluent-bit-enforcer
-echo "    ✓ Static pod enforcer removed"
+# 1a: Delete the enforcer Deployment (B3)
+echo "  Deleting enforcer Deployment..."
+kubectl delete deployment log-governance-controller -n "$OPS_NS" 2>/dev/null && echo "    ✓ log-governance-controller deleted" || true
 
-# Wait for kubelet to clean up the static pod
-sleep 10
-
-# 1b: Remove ALL host-level cron enforcers (B4, B12)
-echo "  Removing host cron enforcers..."
-sudo rm -f /etc/cron.d/log-collector-reconciler
-sudo rm -f /etc/cron.d/logging-policy-enforcer
-sudo rm -f /etc/cron.d/node-taint-enforcer
-# Keep harmless decoy crons — they don't need removal
-sudo rm -rf /etc/logging-governance
-echo "    ✓ Host cron enforcers removed"
-
-# 1c: Delete CronJob enforcers in platform-ops (B4, B12)
+# 1b: Delete CronJob enforcers in platform-ops (B4, B12)
 echo "  Deleting CronJob enforcers in platform-ops..."
 kubectl delete cronjob log-collector-reconciler -n "$OPS_NS" 2>/dev/null && echo "    ✓ log-collector-reconciler deleted" || true
 kubectl delete cronjob logging-policy-enforcer -n "$OPS_NS" 2>/dev/null && echo "    ✓ logging-policy-enforcer deleted" || true
+kubectl delete cronjob node-taint-enforcer -n "$OPS_NS" 2>/dev/null && echo "    ✓ node-taint-enforcer deleted" || true
 kubectl delete jobs --all -n "$OPS_NS" 2>/dev/null || true
 echo ""
 
@@ -742,12 +721,12 @@ kubectl get resourcequota -n "$MON_NS" 2>/dev/null || echo "  None"
 kubectl get limitrange -n "$MON_NS" 2>/dev/null || echo "  None"
 echo ""
 
-echo "  Host cron enforcers (should only be harmless decoys):"
-ls /etc/cron.d/ 2>/dev/null
+echo "  Enforcer Deployment in platform-ops (should not exist):"
+kubectl get deployment log-governance-controller -n "$OPS_NS" 2>/dev/null || echo "  Deleted"
 echo ""
 
-echo "  Static pod manifests (should be empty or no enforcer):"
-ls /var/lib/rancher/k3s/agent/pod-manifests/ 2>/dev/null
+echo "  Enforcer CronJobs in platform-ops (should not exist):"
+kubectl get cronjob log-collector-reconciler logging-policy-enforcer node-taint-enforcer -n "$OPS_NS" 2>/dev/null || echo "  All deleted"
 echo ""
 
 echo "  Loki query test (checking for node_name label):"
